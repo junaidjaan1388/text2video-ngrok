@@ -1,5 +1,5 @@
-# .github/workflows/video-server-no-auth.yml
-name: Video Server - No Authentication Needed
+# .github/workflows/video-server-with-password.yml
+name: Video Server with Password
 
 on: [workflow_dispatch]
 
@@ -22,32 +22,37 @@ jobs:
       with:
         node-version: '18'
         
-    - name: Install Python dependencies
+    - name: Install dependencies
       run: |
-        pip install --upgrade pip
+        # Python dependencies
         pip install torch --index-url https://download.pytorch.org/whl/cpu
-        pip install diffusers transformers
-        pip install fastapi uvicorn
+        pip install diffusers transformers fastapi uvicorn
         pip install opencv-python imageio imageio-ffmpeg pillow
         
-    - name: Install LocalTunnel
-      run: npm install -g localtunnel
+        # Node.js dependencies
+        npm install -g localtunnel
+        
+    - name: Get tunnel password
+      id: get_password
+      run: |
+        # Get the public IP (this is the password)
+        TUNNEL_PASSWORD=$(curl -s https://api.ipify.org)
+        echo "TUNNEL_PASSWORD=$TUNNEL_PASSWORD" >> $GITHUB_ENV
+        echo "🔑 Tunnel Password: $TUNNEL_PASSWORD"
         
     - name: Create video server
       run: |
         cat > server.py << 'EOF'
         from fastapi import FastAPI, HTTPException
-        from fastapi.responses import FileResponse
+        from fastapi.responses import FileResponse, JSONResponse
         from pydantic import BaseModel
         import uvicorn
         import threading
         import time
         import os
-        import subprocess
-        import requests
         from datetime import datetime
         
-        app = FastAPI(title="Video Generator", description="No authentication needed!")
+        app = FastAPI(title="Video Generator")
         
         class VideoRequest(BaseModel):
             prompt: str = "A teddy bear waving"
@@ -56,19 +61,21 @@ jobs:
         
         @app.get("/")
         async def home():
-            return {
-                "message": "🎬 Video Generation Server (No Auth)", 
+            return JSONResponse({
+                "message": "🎬 Video Generation Server", 
                 "status": "running",
+                "password_required": True,
+                "password": "${{ env.TUNNEL_PASSWORD }}",
                 "endpoints": {
                     "health": "GET /health",
                     "generate": "POST /generate",
                     "download": "GET /download/{filename}"
                 }
-            }
+            })
         
         @app.get("/health")
         async def health():
-            return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+            return {"status": "healthy"}
         
         @app.post("/generate")
         async def generate_video(request: VideoRequest):
@@ -116,16 +123,9 @@ jobs:
         
         if __name__ == "__main__":
             os.makedirs("videos", exist_ok=True)
-            
-            # Start server
             server_thread = threading.Thread(target=start_server)
             server_thread.daemon = True
             server_thread.start()
-            
-            print("✅ FastAPI server started on port 8000")
-            print("⏰ Waiting for LocalTunnel URL...")
-            
-            # Keep alive
             time.sleep(60 * 25)
         EOF
 
@@ -136,28 +136,31 @@ jobs:
         echo "SERVER_PID=$!" >> $GITHUB_ENV
         sleep 5
         
-        # Start LocalTunnel and capture URL
+        # Start LocalTunnel
         npx localtunnel --port 8000 > lt.log 2>&1 &
         echo "LT_PID=$!" >> $GITHUB_ENV
         sleep 10
         
-        # Extract URL from LocalTunnel output
+        # Extract URL
         LT_URL=$(grep -o 'your url is: https://[^ ]*' lt.log | cut -d' ' -f4)
         echo "PUBLIC_URL=$LT_URL" >> $GITHUB_ENV
         echo "🌐 Public URL: $LT_URL"
-        
-        # Write URL to file for backup
-        echo "$LT_URL" > public_url.txt
 
-    - name: Display clickable link
+    - name: Display access information
       run: |
         echo "=========================================="
         echo "🎉 VIDEO SERVER IS LIVE!"
         echo "=========================================="
         echo ""
-        echo "👉 CLICK HERE: $PUBLIC_URL"
+        echo "🌐 URL: $PUBLIC_URL"
+        echo "🔑 PASSWORD: $TUNNEL_PASSWORD"
         echo ""
-        echo "📋 Test with:"
+        echo "📋 ACCESS INSTRUCTIONS:"
+        echo "   1. Click the URL above"
+        echo "   2. Enter this password: $TUNNEL_PASSWORD"
+        echo "   3. You'll see the API documentation"
+        echo ""
+        echo "⚡ QUICK TEST:"
         echo "   curl -X POST '$PUBLIC_URL/generate' \\"
         echo "     -H 'Content-Type: application/json' \\"
         echo "     -d '{\"prompt\": \"A teddy bear\"}'"
@@ -165,13 +168,20 @@ jobs:
         echo "⏰ Runs for 25 minutes"
         echo "=========================================="
         
-        # Create clickable link in summary
+        # Create summary with password
         echo "## 🎬 Video Generation Server" >> $GITHUB_STEP_SUMMARY
-        echo "### 🌐 [Click to Access Your Server]($PUBLIC_URL)" >> $GITHUB_STEP_SUMMARY
+        echo "### 🌐 URL: $PUBLIC_URL" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔑 Password: \`$TUNNEL_PASSWORD\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Access Instructions:**" >> $GITHUB_STEP_SUMMARY
+        echo "1. Click the URL above" >> $GITHUB_STEP_SUMMARY
+        echo "2. Enter the password when prompted" >> $GITHUB_STEP_SUMMARY
+        echo "3. Start generating videos!" >> $GITHUB_STEP_SUMMARY
 
     - name: Keep server alive
       run: |
         echo "🕒 Server running at: $PUBLIC_URL"
+        echo "🔑 Password: $TUNNEL_PASSWORD"
         sleep 1500
 
     - name: Cleanup
