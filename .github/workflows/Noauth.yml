@@ -1,5 +1,5 @@
-# .github/workflows/video-server-with-password.yml
-name: Video Server with Password
+# .github/workflows/video-server-serveo.yml
+name: Video Server - No Password
 
 on: [workflow_dispatch]
 
@@ -12,47 +12,31 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Setup Python and Node.js
+    - name: Setup Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
         
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
-        
     - name: Install dependencies
       run: |
-        # Python dependencies
         pip install torch --index-url https://download.pytorch.org/whl/cpu
         pip install diffusers transformers fastapi uvicorn
         pip install opencv-python imageio imageio-ffmpeg pillow
-        
-        # Node.js dependencies
-        npm install -g localtunnel
-        
-    - name: Get tunnel password
-      id: get_password
-      run: |
-        # Get the public IP (this is the password)
-        TUNNEL_PASSWORD=$(curl -s https://api.ipify.org)
-        echo "TUNNEL_PASSWORD=$TUNNEL_PASSWORD" >> $GITHUB_ENV
-        echo "🔑 Tunnel Password: $TUNNEL_PASSWORD"
         
     - name: Create video server
       run: |
         cat > server.py << 'EOF'
         from fastapi import FastAPI, HTTPException
-        from fastapi.responses import FileResponse, JSONResponse
+        from fastapi.responses import FileResponse
         from pydantic import BaseModel
         import uvicorn
         import threading
         import time
         import os
+        import subprocess
         from datetime import datetime
         
-        app = FastAPI(title="Video Generator")
+        app = FastAPI()
         
         class VideoRequest(BaseModel):
             prompt: str = "A teddy bear waving"
@@ -61,17 +45,7 @@ jobs:
         
         @app.get("/")
         async def home():
-            return JSONResponse({
-                "message": "🎬 Video Generation Server", 
-                "status": "running",
-                "password_required": True,
-                "password": "${{ env.TUNNEL_PASSWORD }}",
-                "endpoints": {
-                    "health": "GET /health",
-                    "generate": "POST /generate",
-                    "download": "GET /download/{filename}"
-                }
-            })
+            return {"message": "🎬 Video Server - No Password!"}
         
         @app.get("/health")
         async def health():
@@ -103,7 +77,6 @@ jobs:
                 
                 return {
                     "status": "success",
-                    "message": "Video generated!",
                     "download_url": f"/download/{filename}",
                     "filename": filename
                 }
@@ -123,70 +96,68 @@ jobs:
         
         if __name__ == "__main__":
             os.makedirs("videos", exist_ok=True)
+            
+            # Start Serveo tunnel (no password required)
+            print("🚀 Starting Serveo tunnel...")
+            serveo_process = subprocess.Popen(
+                ["ssh", "-o", "StrictHostKeyChecking=no", "-R", "80:localhost:8000", "serveo.net"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Wait for Serveo URL
+            time.sleep(10)
+            
+            # Try to get URL from Serveo output
+            try:
+                for line in serveo_process.stderr:
+                    if "serveo.net" in line:
+                        print(f"🌐 Serveo URL: https://{line.split()[-1]}")
+                        break
+            except:
+                pass
+            
+            # Start server
             server_thread = threading.Thread(target=start_server)
             server_thread.daemon = True
             server_thread.start()
+            
+            print("✅ Server started!")
             time.sleep(60 * 25)
         EOF
 
-    - name: Start server and LocalTunnel
+    - name: Start server with Serveo
       run: |
-        # Start FastAPI server
+        # Start the server (Serveo starts automatically in the script)
         python server.py &
         echo "SERVER_PID=$!" >> $GITHUB_ENV
-        sleep 5
         
-        # Start LocalTunnel
-        npx localtunnel --port 8000 > lt.log 2>&1 &
-        echo "LT_PID=$!" >> $GITHUB_ENV
-        sleep 10
-        
-        # Extract URL
-        LT_URL=$(grep -o 'your url is: https://[^ ]*' lt.log | cut -d' ' -f4)
-        echo "PUBLIC_URL=$LT_URL" >> $GITHUB_ENV
-        echo "🌐 Public URL: $LT_URL"
+        # Give it time to establish tunnel
+        sleep 15
+        echo "🌐 Serveo tunnel should be active"
+        echo "💡 Check workflow logs for the Serveo URL"
 
-    - name: Display access information
+    - name: Display information
       run: |
         echo "=========================================="
         echo "🎉 VIDEO SERVER IS LIVE!"
         echo "=========================================="
         echo ""
-        echo "🌐 URL: $PUBLIC_URL"
-        echo "🔑 PASSWORD: $TUNNEL_PASSWORD"
+        echo "🌐 Check the workflow logs above for your Serveo URL"
+        echo "🔐 NO PASSWORD REQUIRED!"
         echo ""
-        echo "📋 ACCESS INSTRUCTIONS:"
-        echo "   1. Click the URL above"
-        echo "   2. Enter this password: $TUNNEL_PASSWORD"
-        echo "   3. You'll see the API documentation"
-        echo ""
-        echo "⚡ QUICK TEST:"
-        echo "   curl -X POST '$PUBLIC_URL/generate' \\"
-        echo "     -H 'Content-Type: application/json' \\"
-        echo "     -d '{\"prompt\": \"A teddy bear\"}'"
+        echo "⚡ The URL will look like: https://xxx.serveo.net"
         echo ""
         echo "⏰ Runs for 25 minutes"
         echo "=========================================="
-        
-        # Create summary with password
-        echo "## 🎬 Video Generation Server" >> $GITHUB_STEP_SUMMARY
-        echo "### 🌐 URL: $PUBLIC_URL" >> $GITHUB_STEP_SUMMARY
-        echo "### 🔑 Password: \`$TUNNEL_PASSWORD\`" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Access Instructions:**" >> $GITHUB_STEP_SUMMARY
-        echo "1. Click the URL above" >> $GITHUB_STEP_SUMMARY
-        echo "2. Enter the password when prompted" >> $GITHUB_STEP_SUMMARY
-        echo "3. Start generating videos!" >> $GITHUB_STEP_SUMMARY
 
-    - name: Keep server alive
+    - name: Keep alive
       run: |
-        echo "🕒 Server running at: $PUBLIC_URL"
-        echo "🔑 Password: $TUNNEL_PASSWORD"
         sleep 1500
 
     - name: Cleanup
       if: always()
       run: |
         pkill -f "python server.py" || true
-        pkill -f localtunnel || true
-        echo "✅ Cleaned up"
+        pkill -f ssh || true
