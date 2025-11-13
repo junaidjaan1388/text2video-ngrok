@@ -1,16 +1,23 @@
-# .github/workflows/fast-video-server.yml
-name: Fast Video Generation Server
+# .github/workflows/video-server.yml
+name: Video Generation Server with URL
 
-on: [workflow_dispatch]
+on: 
+  workflow_dispatch:
+    inputs:
+      server_duration:
+        description: 'How long to keep server running (minutes)'
+        required: false
+        default: '30'
 
 jobs:
-  generate:
+  server:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.server_duration || 30 }}
     
     steps:
-    - uses: actions/checkout@v4
-    
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
     - name: Setup Python
       uses: actions/setup-python@v4
       with:
@@ -20,114 +27,69 @@ jobs:
       run: |
         pip install --upgrade pip
         pip install torch --index-url https://download.pytorch.org/whl/cpu
-        pip install diffusers transformers fastapi uvicorn pydantic
-        pip install opencv-python imageio imageio-ffmpeg pillow pyngrok
+        pip install diffusers transformers
+        pip install fastapi uvicorn pyngrok
+        pip install opencv-python imageio imageio-ffmpeg pillow
         
-    - name: Setup ngrok for public URL
+    - name: Setup ngrok
       run: |
         pip install pyngrok
         ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-        echo "🌐 Setting up public tunnel..."
         
-    - name: Create FastAPI server
+    - name: Create simple video server
       run: |
-        cat > video_server.py << 'EOF'
+        cat > server.py << 'EOF'
         from fastapi import FastAPI, HTTPException
-        from fastapi.responses import FileResponse, JSONResponse
+        from fastapi.responses import FileResponse
         from pydantic import BaseModel
-        from diffusers import DiffusionPipeline
-        from diffusers.utils import export_to_video
         import uvicorn
         import threading
         from pyngrok import ngrok
         import time
         import os
-        from datetime import datetime
-        import logging
         
-        # Setup logging
-        logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger(__name__)
-        
-        app = FastAPI(title="Video Generation Server", version="1.0.0")
-        
-        # Store requests
-        requests_log = []
+        app = FastAPI()
         
         class VideoRequest(BaseModel):
-            prompt: str
-            num_steps: int = 10
-            num_frames: int = 4
-            height: int = 64
-            width: int = 64
-        
-        class VideoResponse(BaseModel):
-            status: str
-            message: str
-            video_url: str = None
-            download_url: str = None
-            prompt: str = None
-            processing_time: float = None
-            timestamp: str
-        
+            prompt: str = "A teddy bear waving"
+            steps: int = 10
+            frames: int = 4
+            
         @app.get("/")
-        async def root():
-            """Root endpoint with server info"""
+        async def home():
             return {
-                "status": "success",
-                "message": "🚀 Video Generation Server is Running!",
+                "message": "🎬 Video Generation Server", 
+                "status": "running",
                 "endpoints": {
-                    "health": "/health",
-                    "generate_video": "/generate (POST)",
-                    "download_video": "/video/{filename}",
-                    "server_info": "/info"
-                },
-                "usage": "POST to /generate with {'prompt': 'your text here'}",
-                "timestamp": datetime.now().isoformat()
+                    "generate": "POST /generate",
+                    "health": "GET /health"
+                }
             }
         
         @app.get("/health")
         async def health():
-            """Health check endpoint"""
-            return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+            return {"status": "healthy"}
         
-        @app.get("/info")
-        async def server_info():
-            """Server information"""
-            return {
-                "status": "success",
-                "server": "Fast Video Generation API",
-                "model": "damo-vilab/text-to-video-ms-1.7b",
-                "max_duration": "30 minutes",
-                "timestamp": datetime.now().isoformat()
-            }
-        
-        @app.post("/generate", response_model=VideoResponse)
+        @app.post("/generate")
         async def generate_video(request: VideoRequest):
-            """Generate video from text prompt"""
-            start_time = time.time()
-            
-            # Log the request
-            requests_log.append({
-                "timestamp": datetime.now().isoformat(),
-                "prompt": request.prompt,
-                "status": "processing"
-            })
-            
             try:
-                logger.info(f"Generating video for: {request.prompt}")
+                print(f"🎬 Generating video: {request.prompt}")
                 
-                # Load model (in production, you'd initialize this once)
+                # Import here to avoid slow startup
+                from diffusers import DiffusionPipeline
+                from diffusers.utils import export_to_video
+                
+                # Load model
                 pipe = DiffusionPipeline.from_pretrained('damo-vilab/text-to-video-ms-1.7b')
                 pipe = pipe.to('cpu')
                 
                 # Generate video
                 video_frames = pipe(
                     request.prompt,
-                    num_inference_steps=request.num_steps,
-                    num_frames=request.num_frames,
-                    height=request.height,
-                    width=request.width,
+                    num_inference_steps=request.steps,
+                    num_frames=request.frames,
+                    height=64,
+                    width=64,
                 ).frames[0]
                 
                 # Save video
@@ -136,139 +98,103 @@ jobs:
                 video_path = f"videos/{filename}"
                 export_to_video(video_frames, video_path)
                 
-                processing_time = time.time() - start_time
-                
-                # Update request log
-                requests_log[-1]["status"] = "completed"
-                requests_log[-1]["filename"] = filename
-                requests_log[-1]["processing_time"] = processing_time
-                
-                response = VideoResponse(
-                    status="success",
-                    message="Video generated successfully!",
-                    video_url=f"/video/{filename}",
-                    download_url=f"/download/{filename}",
-                    prompt=request.prompt,
-                    processing_time=round(processing_time, 2),
-                    timestamp=datetime.now().isoformat()
-                )
-                
-                logger.info(f"Video generated: {filename} in {processing_time:.2f}s")
-                return response
+                return {
+                    "status": "success",
+                    "message": "Video generated!",
+                    "download_url": f"/download/{filename}",
+                    "prompt": request.prompt
+                }
                 
             except Exception as e:
-                logger.error(f"Video generation failed: {str(e)}")
-                requests_log[-1]["status"] = "error"
-                requests_log[-1]["error"] = str(e)
-                
-                raise HTTPException(
-                    status_code=500,
-                    detail={
-                        "status": "error",
-                        "message": f"Video generation failed: {str(e)}",
-                        "timestamp": datetime.now().isoformat()
-                    }
-                )
-        
-        @app.get("/video/{filename}")
-        async def get_video(filename: str):
-            """Serve video file"""
-            video_path = f"videos/{filename}"
-            if os.path.exists(video_path):
-                return FileResponse(
-                    video_path,
-                    media_type='video/mp4',
-                    filename=filename
-                )
-            else:
-                raise HTTPException(status_code=404, detail="Video not found")
+                raise HTTPException(status_code=500, detail=str(e))
         
         @app.get("/download/{filename}")
         async def download_video(filename: str):
-            """Download video file"""
             video_path = f"videos/{filename}"
             if os.path.exists(video_path):
-                return FileResponse(
-                    video_path,
-                    media_type='video/mp4',
-                    filename=filename
-                )
-            else:
-                raise HTTPException(status_code=404, detail="Video not found")
-        
-        @app.get("/requests")
-        async def get_requests():
-            """Get all request logs"""
-            return {
-                "status": "success",
-                "total_requests": len(requests_log),
-                "requests": requests_log
-            }
+                return FileResponse(video_path, filename=filename)
+            raise HTTPException(status_code=404, detail="Video not found")
         
         def start_server():
-            """Start the FastAPI server"""
-            uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+            uvicorn.run(app, host="0.0.0.0", port=8000)
         
         if __name__ == "__main__":
-            # Create videos directory
-            os.makedirs("videos", exist_ok=True)
+            # Start ngrok
+            public_url = ngrok.connect(8000)
+            print(f"🚀 PUBLIC URL: {public_url}")
             
-            # Start ngrok tunnel
-            print("🚀 Starting ngrok tunnel...")
-            public_url = ngrok.connect(8000, bind_tls=True)
-            print(f"🌐 PUBLIC URL: {public_url}")
-            print("📋 Use this URL to access your video generation server!")
-            print("⏰ Server will run for 25 minutes...")
-            
-            # Write URL to file for the workflow
+            # Write URL to file
             with open("public_url.txt", "w") as f:
-                f.write(public_url)
+                f.write(str(public_url))
             
-            # Start server in a thread
+            # Start server
             server_thread = threading.Thread(target=start_server)
             server_thread.daemon = True
             server_thread.start()
             
-            # Keep the main thread alive
+            # Keep alive
             try:
-                # Run for 25 minutes (workflow timeout is 30 minutes)
-                time.sleep(1500)
-            except KeyboardInterrupt:
-                print("Shutting down server...")
+                time.sleep(60 * 25)  # 25 minutes
+            except:
+                pass
         EOF
 
-    - name: Start server with public URL
+    - name: Start server and get public URL
       run: |
-        python video_server.py &
-        SERVER_PID=$!
-        echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+        python server.py &
         sleep 10
         
-        # Get the public URL
+        # Get public URL
         if [ -f "public_url.txt" ]; then
             PUBLIC_URL=$(cat public_url.txt)
-            echo "PUBLIC_URL=$PUBLIC_URL" >> $GITHUB_ENV
-            echo "🚀 Server is live at: $PUBLIC_URL"
         else
-            # Fallback: get URL from ngrok API
-            TUNNELS=$(curl -s localhost:4040/api/tunnels)
-            PUBLIC_URL=$(echo $TUNNELS | python -c "import sys, json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
-            echo "PUBLIC_URL=$PUBLIC_URL" >> $GITHUB_ENV
-            echo "🚀 Server is live at: $PUBLIC_URL"
+            PUBLIC_URL=$(curl -s localhost:4040/api/tunnels | python3 -c "import sys, json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
         fi
         
-        # Test the server
-        echo "Testing server endpoints..."
-        curl -f $PUBLIC_URL/health && echo "✅ Health check passed" || echo "❌ Health check failed"
-        curl -f $PUBLIC_URL/info && echo "✅ Server info endpoint working" || echo "❌ Info endpoint failed"
-
-    - name: Display clickable URL
+        echo "PUBLIC_URL=$PUBLIC_URL" >> $GITHUB_ENV
+        echo "🎉 SERVER URL: $PUBLIC_URL"
+        
+    - name: Display clickable link
       run: |
-        echo "================================================"
-        echo "🎉 VIDEO GENERATION SERVER IS NOW LIVE!"
-        echo "================================================"
+        echo "==================================================="
+        echo "🚀 VIDEO GENERATION SERVER IS READY!"
+        echo "==================================================="
         echo ""
-        echo "🌐 CLICK THIS LINK TO ACCESS YOUR SERVER:"
+        echo "👉 CLICK THIS LINK TO ACCESS YOUR SERVER:"
+        echo "   $PUBLIC_URL"
+        echo ""
+        echo "📋 HOW TO USE:"
+        echo "   1. Click the link above"
+        echo "   2. You'll see API documentation"
+        echo "   3. Test the /generate endpoint with:"
+        echo "      {'prompt': 'A teddy bear waving'}"
+        echo ""
+        echo "⏰ Server will run for 25 minutes"
+        echo "==================================================="
+        
+        # Create a direct link in workflow summary
+        echo "## 🎬 Video Generation Server" >> $GITHUB_STEP_SUMMARY
+        echo "### 👉 [Click here to access your server]($PUBLIC_URL)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Quick test:**" >> $GITHUB_STEP_SUMMARY
+        echo '```bash' >> $GITHUB_STEP_SUMMARY
+        echo "curl -X POST '$PUBLIC_URL/generate' \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -H 'Content-Type: application/json' \\" >> $GITHUB_STEP_SUMMARY
+        echo "  -d '{\"prompt\": \"A teddy bear waving\"}'" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+    - name: Keep server alive
+      run: |
+        echo "🕒 Server will stay active for 25 minutes..."
+        echo "📱 Access at: $PUBLIC_URL"
+        sleep 1500
+
+    - name: Cleanup
+      if: always()
+      run: |
+        pkill -f "python server.py" || true
+        pkill -f ngrok || true
+        echo "✅ Server stopped"VER:"
         echo "   $PUBLIC_URL"
         echo ""
         echo "📋 QUICK START:"
